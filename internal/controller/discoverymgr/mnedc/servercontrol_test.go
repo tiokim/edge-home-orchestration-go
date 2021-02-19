@@ -74,6 +74,7 @@ func TestStartMNEDCServer(t *testing.T) {
 		mockMnedcServer.EXPECT().CreateServer(gomock.Any(), gomock.Any(), gomock.Any()).Return(&server.Server{}, nil)
 		mockMnedcServer.EXPECT().Run()
 		mockNetwork.EXPECT().GetOutboundIP().Return(defaultOutboundIP, nil)
+		mockMnedcServer.EXPECT().GetVirtualIP().Return(clientDefaultVirtualIP)
 		mockMnedcServer.EXPECT().SetClientIP(gomock.Any(), gomock.Any(), gomock.Any())
 		s.StartMNEDCServer(defaultDeviceIDFilePath)
 	})

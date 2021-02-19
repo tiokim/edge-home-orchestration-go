@@ -20,8 +20,8 @@ package server
 import (
 	"errors"
 	"github.com/lf-edge/edge-home-orchestration-go/internal/common/logmgr"
+	"math/rand"
 	"net"
-	"strconv"
 	"sync"
 
 	"github.com/lf-edge/edge-home-orchestration-go/internal/controller/discoverymgr/mnedc/connectionutil"
@@ -49,18 +49,17 @@ type IPTypes struct {
 }
 
 const (
-	logTag               = "[mnedcserver]"
-	serverVirtualAddress = "10.0.0.1/24"
-	virtualIPPrefix      = "10.0.0."
-	channelSize          = 200
-	packetSize           = 1024
+	logTag      = "[mnedcserver]"
+	channelSize = 200
+	packetSize  = 1024
 )
 
 var (
-	serverIns      *Server
-	tunIns         tunmgr.Tun
-	networkUtilIns connectionutil.NetworkUtil
-	log            = logmgr.GetInstance()
+	serverIns       *Server
+	tunIns          tunmgr.Tun
+	networkUtilIns  connectionutil.NetworkUtil
+	serverVirtualIP = net.IPv4(10,7,byte(rand.Intn(255)),1)
+	log             = logmgr.GetInstance()
 )
 
 //Server defines MNEDC server struct
@@ -88,6 +87,7 @@ type MNEDCServer interface {
 	AcceptRoutine()
 	HandleConnection(net.Conn)
 	SetVirtualIP(string) string
+	GetVirtualIP() string
 	DispatchRoutine()
 	Route(*NetPacket)
 	SetClientAddress(string, string)
@@ -122,14 +122,12 @@ func (s *Server) CreateServer(address, port string, isSecure bool) (*Server, err
 		return nil, err
 	}
 
-	virtualIP, virtualNetMask, err := net.ParseCIDR(serverVirtualAddress)
-	if err != nil {
-		return nil, errors.New(logPrefix + " Invalid network/mask:" + err.Error())
-	}
-
 	s.listener = listener
-	s.virtualIP = virtualIP
-	s.netMask = virtualNetMask
+	s.virtualIP = serverVirtualIP
+	s.netMask = &net.IPNet{
+		IP:s.virtualIP,
+		Mask: net.CIDRMask(24, 32),
+	}
 	s.isAlive = true
 	s.clientCount = 1
 	s.clients = map[string]*clientConnection{}
@@ -240,7 +238,7 @@ func (s *Server) SetVirtualIP(deviceID string) string {
 		ip = val
 	} else {
 		s.clientCount = s.clientCount + 1
-		ip = virtualIPPrefix + strconv.Itoa(s.clientCount)
+		ip = net.IPv4(s.virtualIP[12], s.virtualIP[13], s.virtualIP[14], byte(s.clientCount)).String()
 		s.clientsLock.Lock()
 		s.clientAddressByDeviceID[deviceID] = ip
 		s.clientsLock.Unlock()
@@ -248,6 +246,11 @@ func (s *Server) SetVirtualIP(deviceID string) string {
 	log.Println(logTag, "[NewConnection]", "The ip given is", ip)
 
 	return ip
+}
+
+//GetVirtualIP returns the server virtualIP
+func (s *Server) GetVirtualIP() string {
+	return s.virtualIP.String()
 }
 
 //DispatchRoutine sends packets from inboundIPPkts/inboundDevPkts to client/TUN.

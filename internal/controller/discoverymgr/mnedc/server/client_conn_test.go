@@ -22,6 +22,7 @@ import (
 	"net"
 	"testing"
 	"time"
+	"math/rand"
 
 	"github.com/golang/mock/gomock"
 	"github.com/songgao/water"
@@ -176,6 +177,7 @@ func TestClientMaps(t *testing.T) {
 			clientIDByAddress:       map[string]string{},
 			clientAddressByDeviceID: map[string]string{},
 			clientCount:             1,
+			virtualIP:               net.IPv4(10,7,byte(rand.Intn(255)),1),
 		}
 
 		serverInstance.SetClientIP(defaultID, defaultIP, defaultVirtualIP)
