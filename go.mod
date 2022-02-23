@@ -33,7 +33,6 @@ require (
 	github.com/satori/go.uuid v1.2.0
 	github.com/shirou/gopsutil v3.21.11+incompatible
 	github.com/sirupsen/logrus v1.8.1
-	github.com/smartystreets/goconvey v1.6.4 // indirect
 	github.com/songgao/water v0.0.0-20200317203138-2b4b6d7c09d8
 	github.com/spf13/cast v1.3.1
 	github.com/spf13/pflag v1.0.3
@@ -46,7 +45,7 @@ require (
 	go.etcd.io/bbolt v1.3.5
 	golang.org/x/time v0.0.0-20210611083556-38a9dc6acbc6 // indirect
 	google.golang.org/grpc v1.34.0 // indirect
-	gopkg.in/ini.v1 v1.62.0
+	gopkg.in/ini.v1 v1.66.4
 	gopkg.in/yaml.v2 v2.4.0
 	gotest.tools v2.2.0+incompatible // indirect
 	gotest.tools/v3 v3.0.3
