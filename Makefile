@@ -64,6 +64,7 @@ CMD_DIR 	:= $(BASE_DIR)/cmd
 CMD_SRC 	:= $(CMD_DIR)/edge-orchestration/main.go
 BIN_DIR 	:= $(BASE_DIR)/bin
 BIN_FILE	:= $(PKG_NAME)
+WEB_DIR 	:= $(BASE_DIR)/web
 
 # Go Library for C-archive
 LIBRARY_NAME		:= liborchestration
@@ -169,6 +170,12 @@ build-object-java:
 	$(Q) go mod tidy
 	$(Q) ls -al $(ANDROID_LIBRARY_OUT_DIR)
 
+## webui build
+build-webui:
+	$(call print_header, "Build web contents through buildx")
+	cd web && npm install && npm run build
+	$(Q) ls -al $(WEB_DIR)
+
 ## edge-orchestration container build
 build_docker_container:
 	$(call print_header, "Create Docker container $(CONTAINER_ARCH)")
@@ -185,6 +192,7 @@ ifneq ($(shell uname -m),aarch64)
 	$(Q) cp /usr/bin/qemu-aarch64-static $(BASE_DIR)/bin/qemu
 endif
 endif
+	make build-webui
 	$(DOCKER) build --tag $(DOCKER_IMAGE):$(CONTAINER_VERSION) --file $(BASE_DIR)/Dockerfile --build-arg PLATFORM=$(CONTAINER_ARCH) .
 	-docker save -o $(BASE_DIR)/bin/edge-orchestration.tar $(DOCKER_IMAGE)
 
@@ -206,6 +214,7 @@ clean: go.sum
 	$(Q) -rm -rf $(ANDROID_LIBRARY_OUT_DIR)
 	$(Q) -rm -rf $(BASE_DIR)/bin/$(PKG_NAME)*
 	$(Q) -rm -rf $(BASE_DIR)/coverage.out
+	$(Q) -rm -rf $(WEB_DIR)/build $(WEB_DIR)/node_modules
 	$(Q) make -C examples/native clean
 
 distclean: clean

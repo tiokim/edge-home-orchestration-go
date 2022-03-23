@@ -6,6 +6,7 @@ ARG TARGETPLATFORM
 ENV GOVERSION=1.16.6
 ENV GOPATH=/usr/local/go
 ENV TARGET_DIR=/edge-orchestration
+ENV WEBUI_DIR=$TARGET_DIR/web
 
 # set the working directory
 WORKDIR $TARGET_DIR
@@ -14,10 +15,13 @@ COPY . .
 
 # install required tools
 RUN apt update
-RUN apt install -y wget build-essential git
+RUN apt install -y wget build-essential git curl
+RUN curl -fsSL https://deb.nodesource.com/setup_16.x | bash -
+RUN apt-get install -y nodejs
 RUN script/install-golang.sh
 ARG TARGETVERSION
 RUN make buildx_binary VERSION=$TARGETVERSION
+RUN make build-webui
 
 FROM ubuntu:18.04
 
@@ -40,7 +44,7 @@ WORKDIR $TARGET_DIR
 # copy files
 COPY --from=builder $TARGET_DIR/$APP_BIN_DIR/$APP_NAME $TARGET_DIR/
 COPY --from=builder $TARGET_DIR/$BUILD_DIR/package/run.sh $TARGET_DIR/
-COPY --from=builder $TARGET_DIR/$WEB_DIR/static $TARGET_DIR/$WEB_DIR/
+COPY --from=builder $TARGET_DIR/$WEB_DIR/$BUILD_DIR $TARGET_DIR/$WEB_DIR/
 RUN mkdir -p $TARGET_DIR/res/
 
 # install required tools
