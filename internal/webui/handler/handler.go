@@ -1,5 +1,5 @@
 /*******************************************************************************
- * Copyright 2021 Samsung Electronics All Rights Reserved.
+ * Copyright 2022 Samsung Electronics All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -15,32 +15,31 @@
  *
  *******************************************************************************/
 
-package webui
+package handler
 
 import (
-	"github.com/lf-edge/edge-home-orchestration-go/internal/common/logmgr"
-	"github.com/lf-edge/edge-home-orchestration-go/internal/webui/handler"
+	mux "github.com/gorilla/mux"
 	"net/http"
-	"strconv"
-	"time"
 )
 
-const timeout = 15
-
-var (
-	uiPort = 49153
-	log    = logmgr.GetInstance()
+const (
+	assetFolder = "web"
 )
 
-// Start starts the server for web UI
-func Start() {
-	s := &http.Server{
-		Handler:      handler.Routes(),
-		Addr:         ":" + strconv.Itoa(uiPort),
-		WriteTimeout: timeout * time.Second,
-		ReadTimeout:  timeout * time.Second,
-	}
+// Routes registers routes for web UI
+func Routes() http.Handler {
+	r := mux.NewRouter()
+	r.HandleFunc("/", staticHandler)
 
-	go s.ListenAndServe()
-	log.Debug("Start UI server")
+	s := r.PathPrefix("/api/v1").Subrouter()
+	s.HandleFunc("/memory", memoryHandler).Methods("GET")
+	return r
+}
+
+func staticHandler(w http.ResponseWriter, r *http.Request) {
+	http.FileServer(http.Dir(assetFolder)).ServeHTTP(w, r)
+}
+
+func memoryHandler(w http.ResponseWriter, r *http.Request) {
+	w.Write([]byte("pong"))
 }
