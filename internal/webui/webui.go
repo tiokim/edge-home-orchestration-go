@@ -19,6 +19,7 @@ package webui
 
 import (
 	"github.com/lf-edge/edge-home-orchestration-go/internal/common/logmgr"
+	"github.com/lf-edge/edge-home-orchestration-go/internal/webui/handler"
 	"net/http"
 	"strconv"
 	"time"
@@ -27,15 +28,14 @@ import (
 const timeout = 15
 
 var (
-	assetFolder = "web"
-	uiPort      = 49153
-	log         = logmgr.GetInstance()
+	uiPort = 49153
+	log    = logmgr.GetInstance()
 )
 
 // Start starts the server for web UI
 func Start() {
 	s := &http.Server{
-		Handler:      uiHandler(),
+		Handler:      handler.Routes(),
 		Addr:         ":" + strconv.Itoa(uiPort),
 		WriteTimeout: timeout * time.Second,
 		ReadTimeout:  timeout * time.Second,
@@ -43,10 +43,4 @@ func Start() {
 
 	go s.ListenAndServe()
 	log.Debug("Start UI server")
-}
-
-func uiHandler() http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		http.FileServer(http.Dir(assetFolder)).ServeHTTP(w, r)
-	})
 }
