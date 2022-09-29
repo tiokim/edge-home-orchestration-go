@@ -26,7 +26,7 @@ jobs:
         id: meta
         uses: docker/metadata-action@69f6fc9d46f2f8bf0d5491e4aabe0bb8c6a4678a # v4
         with:
-          images: lfedge/edge-home-orchestration-go
+          images: t25kim/edge-home-orchestration-go
           tags: |
             type=semver,pattern={{version}}
 
