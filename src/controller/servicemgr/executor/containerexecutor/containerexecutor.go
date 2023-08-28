@@ -30,6 +30,7 @@ import (
 	"github.com/docker/docker/pkg/stdcopy"
 	"github.com/spf13/pflag"
 
+	verifier "controller/securemgr/verifier"
 	servicemgr "controller/servicemgr"
 	"controller/servicemgr/executor"
 	"controller/servicemgr/notification"
@@ -70,8 +71,14 @@ func (c ContainerExecutor) Execute(s executor.ServiceExecutionInfo) error {
 	log.Println(logPrefix, "parameter length :", len(c.ParamStr))
 	paramLen := len(c.ParamStr)
 
+	err := verifier.GetInstance().ContainerIsInWhiteList(s.ParamStr[paramLen-1])
+	if err != nil {
+		log.Println(logPrefix, err.Error())
+		return err
+	}
+
 	// @Note : Pull docker image
-	err := c.ceImplIns.ImagePull(s.ParamStr[paramLen-1])
+	err = c.ceImplIns.ImagePull(s.ParamStr[paramLen-1])
 	if err != nil {
 		log.Println(logPrefix, err.Error())
 	}
@@ -91,6 +98,14 @@ func (c ContainerExecutor) Execute(s executor.ServiceExecutionInfo) error {
 		return err
 	}
 
+	// @Note : get log of container
+	out, err := c.ceImplIns.Logs(resp.ID)
+	if err != nil {
+		log.Println(logPrefix, err.Error())
+	} else {
+		stdcopy.StdCopy(os.Stdout, os.Stderr, out)
+	}
+
 	// @Note : Waiting Container execution status
 	var executionStatus string
 	statusCh, errCh := c.ceImplIns.Wait(resp.ID, container.WaitConditionNotRunning)
@@ -103,14 +118,6 @@ func (c ContainerExecutor) Execute(s executor.ServiceExecutionInfo) error {
 		if status.StatusCode == 0 {
 			executionStatus = servicemgr.ConstServiceStatusFinished
 		}
-	}
-
-	// @Note : get log of container
-	out, err := c.ceImplIns.Logs(resp.ID)
-	if err != nil {
-		log.Println(logPrefix, err.Error())
-	} else {
-		stdcopy.StdCopy(os.Stdout, os.Stderr, out)
 	}
 
 	// @Note : make notification

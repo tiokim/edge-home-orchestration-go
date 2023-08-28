@@ -16,6 +16,7 @@ PKG_LIST=(
         "common/resourceutil/cpu"
         "common/resourceutil/native"
         "common/resourceutil/types/servicemgrtypes"
+        "common/sigmgr"
         "common/types/configuremgrtypes"
         "common/types/servicemgrtypes"
         "controller/configuremgr"
@@ -24,12 +25,20 @@ PKG_LIST=(
         "controller/discoverymgr"
         "controller/discoverymgr/wrapper"
         "controller/scoringmgr"
+        "controller/securemgr/verifier"
+        "controller/securemgr/authenticator"
         "controller/servicemgr"
         "controller/servicemgr/executor"
         "controller/servicemgr/executor/androidexecutor"
         "controller/servicemgr/executor/containerexecutor"
         "controller/servicemgr/executor/nativeexecutor"
         "controller/servicemgr/notification"
+        "controller/mnedcmgr"
+        "controller/mnedcmgr/client"
+        "controller/mnedcmgr/connectionutil"
+        "controller/mnedcmgr/server"
+        "controller/mnedcmgr/tunmgr"
+        "controller/storagemgr/storagedriver"
         "db/bolt/common"
         "db/bolt/configuration"
         "db/bolt/network"
@@ -53,7 +62,7 @@ PKG_LIST=(
         "restinterface/route"
 )
 
-export CONTAINER_VERSION="baobab"
+export CONTAINER_VERSION="coconut"
 export BUILD_DATE=$(date +%Y%m%d.%H%M)
 
 function set_secure_option() {
@@ -62,6 +71,30 @@ function set_secure_option() {
     echo " Set tags for secure build"
     echo "-----------------------------------"
     export BUILD_TAGS="secure"
+}
+
+function set_mnedc_server_option() {
+    echo ""
+    echo "-----------------------------------"
+    echo " Set tags for start mnedc server"
+    echo "-----------------------------------"
+    if [ "$1" == "secure" ]; then
+        export BUILD_TAGS="securemnedcserver"
+    else 
+        export BUILD_TAGS="mnedcserver"
+    fi
+}
+
+function set_mnedc_client_option() {
+    echo ""
+    echo "-----------------------------------"
+    echo " Set tags for start mnedc client"
+    echo "-----------------------------------"
+    if [ "$1" == "secure" ]; then
+        export BUILD_TAGS="securemnedcclient"
+    else 
+        export BUILD_TAGS="mnedcclient"
+    fi
 }
 
 function install_3rdparty_packages() {
@@ -105,6 +138,7 @@ function install_prerequisite() {
         "github.com/Songmu/make2help/cmd/make2help"
         "golang.org/x/mobile/cmd/gomobile"
         "golang.org/x/mobile/cmd/gobind"
+        "github.com/dgrijalva/jwt-go"
     )
     idx=1
     for pkg in "${pkg_list[@]}"; do
@@ -127,6 +161,37 @@ function build_clean() {
     make clean
 }
 
+function build_binaries() {
+    echo ""
+    echo ""
+    echo "**********************************"
+    echo " Target Binary arch is "$1
+    echo "**********************************"
+    case $1 in
+        x86)
+            export GOARCH=386
+            export ARCH=x86
+            ;;
+        x86_64)
+            export GOARCH=amd64
+            export ARCH=x86-64
+            ;;
+        arm)
+            export GOARCH=arm GOARM=7
+            export ARCH=arm
+            ;;
+        arm64)
+            export GOARCH=arm64
+            export ARCH=aarch64
+            ;;
+        *)
+            echo "Target arch isn't supported" && exit 1
+            ;;
+    esac
+
+    build_binary
+}
+
 function build_binary() {
     echo ""
     echo "----------------------------------------"
@@ -144,8 +209,6 @@ function build_object() {
     echo "----------------------------------------"
     make build-object-c || exit 1
 }
-
-
 
 function build_test() {
     echo ""
@@ -209,6 +272,32 @@ function draw_callvis() {
     export GOPATH=$BASE_DIR/GoMain:$GOPATH
     go-callvis -http localhost:7010 -group pkg,type -nostd ./GoMain/src/main/main.go &
 }
+
+function build_objects() {
+    case $1 in
+        x86)
+            build_object_x86
+            export ANDROID_TARGET="android/386";;
+        x86_64)
+            build_object_x86-64
+            export ANDROID_TARGET="android/amd64";;
+        arm)
+            build_object_arm
+            export ANDROID_TARGET="android/arm";;
+        arm64)
+            build_object_aarch64
+            export ANDROID_TARGET="android/arm64";;
+        *)
+            build_object_x86
+            build_object_x86-64
+            build_object_arm
+            build_object_aarch64
+            export ANDROID_TARGET="android";;
+    esac
+
+    build_android
+}
+
 
 function build_object_x86() {
     echo ""
@@ -301,7 +390,41 @@ function build_docker_container() {
 
     docker rm -f $DOCKER_IMAGE
     docker rmi -f $DOCKER_IMAGE:$CONTAINER_VERSION
-    make build-container || exit 1
+    case $1 in
+        x86)
+            CONTAINER_ARCH="i386"
+            ;;
+        x86_64)
+            CONTAINER_ARCH="amd64"
+            ;;
+        arm)
+            CONTAINER_ARCH="arm32v7"
+            ;;
+        arm64)
+            CONTAINER_ARCH="arm64v8"
+            ;;
+        *)
+            case "$(uname -m)" in
+                "i386"|"i686")
+                    CONTAINER_ARCH="i386"
+                    ;;
+                "x86_64")
+                    CONTAINER_ARCH="amd64"
+                    ;;
+                "armv7l")
+                    CONTAINER_ARCH="arm32v7"
+                    ;;
+                "aarch64")
+                    CONTAINER_ARCH="arm64v8"
+                    ;;
+                *)
+                    echo "Target arch isn't supported" && exit 1
+                    ;;
+            esac
+            ;;
+    esac
+
+    make build-container CONTAINER_ARCH=$CONTAINER_ARCH || exit 1
 }
 
 function run_docker_container() {
@@ -316,6 +439,8 @@ function run_docker_container() {
     sudo mkdir -p /var/edge-orchestration/data/cert
     sudo mkdir -p /var/edge-orchestration/user
     sudo mkdir -p /var/edge-orchestration/device
+    sudo mkdir -p /var/edge-orchestration/mnedc
+    sudo mkdir -p /var/edge-orchestration/datastorage
 
     echo ""
     echo "**********************************"
@@ -344,27 +469,51 @@ function stop_docker_container() {
 
 case "$1" in
     "container")
-        if [ "$2" == "secure" ]; then
-            set_secure_option
-        fi
         install_prerequisite
         install_3rdparty_packages
-        build_binary
-        build_docker_container
-        run_docker_container
-        ;;
-    "object")
         if [ "$2" == "secure" ]; then
             set_secure_option
+            build_binaries $3
+            build_docker_container $3
+            docker save -o $BASE_DIR/GoMain/bin/edge-orchestration.tar edge-orchestration
+            if [ "$3" == "x86_64" ]; then
+                run_docker_container
+            fi
+        else
+            build_binaries $2
+            build_docker_container $2
+            docker save -o $BASE_DIR/GoMain/bin/edge-orchestration.tar edge-orchestration
+            if [ "$2" == "x86_64" ]; then
+                run_docker_container
+            fi
         fi
+        ;;
+    "object")
+        case "$2" in
+            "secure")
+                if [ "$3" == "mnedcserver" ]; then
+                    set_mnedc_server_option $2
+                elif [ "$3" == "mnedcclient" ]; then
+                    set_mnedc_client_option $2
+                elif [ "$3" == "" ]; then
+                    set_secure_option
+                fi
+                ;;
+            "mnedcserver")
+                set_mnedc_server_option $3
+                ;;
+            "mnedcclient")
+                set_mnedc_client_option $3
+                ;;
+        esac
         install_prerequisite
         install_3rdparty_packages
         build_clean
-        build_android
-        build_object_x86
-        build_object_aarch64
-        build_object_arm
-        build_object_x86-64
+        if [ "$2" == "secure" ]; then
+            build_objects $3
+        else
+            build_objects $2
+        fi
         build_object_result
         ;;
     "test")
@@ -399,19 +548,39 @@ case "$1" in
         build_docker_container
         run_docker_container
         ;;
+    "mnedcserver")
+        set_mnedc_server_option $2
+        install_prerequisite
+        install_3rdparty_packages
+        build_binary
+        build_docker_container
+        run_docker_container
+        ;;
+    "mnedcclient")
+        set_mnedc_client_option $2
+        install_prerequisite
+        install_3rdparty_packages
+        build_binary
+        build_docker_container
+        run_docker_container
+        ;;
     *)
         echo "build script"
         echo "Usage:"
-        echo "----------------------------------------------------------------------------------------------"
-        echo "  $0                  : build edge-orchestration by default container"
-        echo "  $0 secure           : build edge-orchestration by default container with secure option"
-        echo "  $0 container        : build Docker container as build system environmet"
-        echo "  $0 container secure : build Docker container as build system environmet with secure option"
-        echo "  $0 object           : build object (c-object, java-object)"
-        echo "  $0 object secure    : build object (c-object, java-object) with secure option"
-        echo "  $0 clean            : build clean"
-        echo "  $0 test [PKG_NAME]  : run unittests (optional for PKG_NAME)"
-        echo "----------------------------------------------------------------------------------------------"
+        echo "-------------------------------------------------------------------------------------------------------------------------------------------"
+        echo "  $0                         : build edge-orchestration by default Docker container"
+        echo "  $0 secure                  : build edge-orchestration by default Docker container with secure option"
+        echo "  $0 container [Arch]        : build Docker container Arch:{x86, x86_64, arm, arm64}"
+        echo "  $0 container secure [Arch] : build Docker container  with secure option Arch:{x86, x86_64, arm, arm64}"
+        echo "  $0 object [Arch]           : build object (c-object, java-object), Arch:{x86, x86_64, arm, arm64} (default:all)"
+        echo "  $0 object secure [Arch]    : build object (c-object, java-object) with secure option, Arch:{x86, x86_64, arm, arm64} (default:all)"
+        echo "  $0 mnedcserver             : build edge-orchestration by default container with MNEDC server running option"
+        echo "  $0 mnedcserver secure      : build edge-orchestration by default container with MNEDC server running option in secure mode"
+        echo "  $0 mnedcclient             : build edge-orchestration by default container with MNEDC client running option"
+        echo "  $0 mnedcclient secure      : build edge-orchestration by default container with MNEDC client running option in secure mode"
+        echo "  $0 clean                   : build clean"
+        echo "  $0 test [PKG_NAME]         : run unittests (optional for PKG_NAME)"
+        echo "-------------------------------------------------------------------------------------------------------------------------------------------"
         exit 0
         ;;
 esac

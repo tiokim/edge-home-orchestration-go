@@ -1,7 +1,5 @@
-// +build !secure
-
 /*******************************************************************************
- * Copyright 2019 Samsung Electronics All Rights Reserved.
+ * Copyright 2020 Samsung Electronics All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -22,17 +20,22 @@ package main
 
 import (
 	"errors"
-	"flag"
 	"log"
-	"time"
+	"strings"
+	"os"
 
 	"common/logmgr"
+	"common/sigmgr"
 
 	configuremgr "controller/configuremgr/container"
 	"controller/discoverymgr"
+	"controller/mnedcmgr"
 	"controller/scoringmgr"
+	"controller/securemgr/authenticator"
+	"controller/securemgr/verifier"
 	"controller/servicemgr"
 	executor "controller/servicemgr/executor/containerexecutor"
+	"controller/storagemgr/storagedriver"
 
 	"orchestrationapi"
 
@@ -44,6 +47,9 @@ import (
 	"restinterface/route"
 
 	"db/bolt/wrapper"
+
+	"github.com/edgexfoundry/device-sdk-go"
+	"github.com/edgexfoundry/device-sdk-go/pkg/startup"
 )
 
 const logPrefix = "interface"
@@ -53,19 +59,24 @@ const (
 	platform      = "docker"
 	executionType = "container"
 
+	dataStorageService = "datastorage"
+
 	edgeDir = "/var/edge-orchestration"
 
-	logPath             = edgeDir + "/log"
-	configPath          = edgeDir + "/apps"
-	dbPath              = edgeDir + "/data/db"
-	certificateFilePath = edgeDir + "/data/cert"
+	logPath                = edgeDir + "/log"
+	configPath             = edgeDir + "/apps"
+	dbPath                 = edgeDir + "/data/db"
+	certificateFilePath    = edgeDir + "/data/cert"
+	containerWhiteListPath = edgeDir + "/data/cwl"
+	passPhraseJWTPath      = edgeDir + "/data/jwt"
 
-	cipherKeyFilePath = edgeDir + "/user/orchestration_userID.txt"
-	deviceIDFilePath  = edgeDir + "/device/orchestration_deviceID.txt"
+	cipherKeyFilePath      = edgeDir + "/user/orchestration_userID.txt"
+	deviceIDFilePath       = edgeDir + "/device/orchestration_deviceID.txt"
+	dataStorageFilePath    = edgeDir + "/datastorage/configuration.toml"
+	mnedcServerConfig      = edgeDir + "/mnedc/client.config"
 )
 
 var (
-	flagVersion                  bool
 	commitID, version, buildTime string
 	buildTags                    string
 )
@@ -74,18 +85,11 @@ func main() {
 	if err := orchestrationInit(); err != nil {
 		log.Fatalf("[%s] Orchestaration initalize fail : %s", logPrefix, err.Error())
 	}
-
-	for {
-		time.Sleep(1000)
-	}
+	sigmgr.Watch()
 }
 
 // orchestrationInit runs orchestration service and discovers other orchestration services in other devices
 func orchestrationInit() error {
-	flag.BoolVar(&flagVersion, "v", false, "if true, print version and exit")
-	flag.BoolVar(&flagVersion, "version", false, "if true, print version and exit")
-	flag.Parse()
-
 	logmgr.Init(logPath)
 	log.Printf("[%s] OrchestrationInit", logPrefix)
 	log.Println(">>> commitID  : ", commitID)
@@ -94,14 +98,32 @@ func orchestrationInit() error {
 	log.Println(">>> buildTags : ", buildTags)
 	wrapper.SetBoltDBPath(dbPath)
 
+	isSecured := false
+	if strings.Contains(buildTags, "secure") {
+		log.Println("Orchestration init with secure option")
+		isSecured = true
+	}
+
+	if isSecured {
+		verifier.Init(containerWhiteListPath)
+		authenticator.Init(passPhraseJWTPath)
+	}
+
 	restIns := restclient.GetRestClient()
-	restIns.SetCipher(sha256.GetCipher(cipherKeyFilePath))
+
+	if isSecured {
+		restIns.SetCipher(dummy.GetCipher(cipherKeyFilePath))
+	} else {
+		restIns.SetCipher(sha256.GetCipher(cipherKeyFilePath))
+	}
 
 	servicemgr.GetInstance().SetClient(restIns)
+	discoverymgr.GetInstance().SetClient(restIns)
 
 	builder := orchestrationapi.OrchestrationBuilder{}
 	builder.SetWatcher(configuremgr.GetInstance(configPath))
 	builder.SetDiscovery(discoverymgr.GetInstance())
+	builder.SetVerifierConf(verifier.GetInstance())
 	builder.SetScoring(scoringmgr.GetInstance())
 	builder.SetService(servicemgr.GetInstance())
 	builder.SetExecutor(executor.GetInstance())
@@ -116,7 +138,11 @@ func orchestrationInit() error {
 	orcheEngine.Start(deviceIDFilePath, platform, executionType)
 
 	var restEdgeRouter *route.RestRouter
-	restEdgeRouter = route.NewRestRouter()
+	if isSecured {
+		restEdgeRouter = route.NewRestRouterWithCerti(certificateFilePath)
+	} else {
+		restEdgeRouter = route.NewRestRouter()
+	}
 
 	internalapi, err := orchestrationapi.GetInternalAPI()
 	if err != nil {
@@ -124,7 +150,13 @@ func orchestrationInit() error {
 	}
 	ihandle := internalhandler.GetHandler()
 	ihandle.SetOrchestrationAPI(internalapi)
-	ihandle.SetCipher(sha256.GetCipher(cipherKeyFilePath))
+
+	if isSecured {
+		ihandle.SetCipher(dummy.GetCipher(cipherKeyFilePath))
+		ihandle.SetCertificateFilePath(certificateFilePath)
+	} else {
+		ihandle.SetCipher(sha256.GetCipher(cipherKeyFilePath))
+	}
 	restEdgeRouter.Add(ihandle)
 
 	// external rest api
@@ -139,11 +171,27 @@ func orchestrationInit() error {
 
 	restEdgeRouter.Start()
 
+	if _, err := os.Stat(dataStorageFilePath); err==nil {
+		sd := storagedriver.StorageDriver{}
+		go startup.Bootstrap(dataStorageService, device.Version, &sd)
+	}
+
 	log.Println(logPrefix, "orchestration init done")
 
-	// TODO remove this line
-	// this line is for wait to initialize the mDNS server.
-	time.Sleep(time.Second * 2)
+	if strings.Contains(buildTags, "mnedcserver") {
+		if isSecured {
+			mnedcmgr.GetServerInstance().SetCipher(dummy.GetCipher(cipherKeyFilePath))
+			mnedcmgr.GetServerInstance().SetCertificateFilePath(certificateFilePath)
+		} else {
+			mnedcmgr.GetServerInstance().SetCipher(sha256.GetCipher(cipherKeyFilePath))
+		}
+		go mnedcmgr.GetServerInstance().StartMNEDCServer(deviceIDFilePath)
+	} else if strings.Contains(buildTags, "mnedcclient") {
+		if isSecured {
+			mnedcmgr.GetClientInstance().SetCertificateFilePath(certificateFilePath)
+		}
+		go mnedcmgr.GetClientInstance().StartMNEDCClient(deviceIDFilePath, mnedcServerConfig)
+	}
 
 	return nil
 }

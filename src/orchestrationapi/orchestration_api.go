@@ -1,5 +1,5 @@
 /*******************************************************************************
- * Copyright 2019 Samsung Electronics All Rights Reserved.
+ * Copyright 2020 Samsung Electronics All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -31,6 +31,7 @@ import (
 	"controller/configuremgr"
 	"controller/discoverymgr"
 	"controller/scoringmgr"
+	"controller/securemgr/verifier"
 	"controller/servicemgr"
 	"controller/servicemgr/notification"
 	"restinterface/client"
@@ -43,6 +44,7 @@ import (
 type orcheImpl struct {
 	Ready bool
 
+	verifierIns     verifier.VerifierConf
 	serviceIns      servicemgr.ServiceMgr
 	scoringIns      scoringmgr.Scoring
 	discoverIns     discoverymgr.Discovery
@@ -54,10 +56,11 @@ type orcheImpl struct {
 	clientAPI client.Clienter
 }
 
-type deviceScore struct {
+type deviceInfo struct {
 	id       string
 	endpoint string
 	score    float64
+	resource map[string]interface{}
 	execType string
 }
 
@@ -71,6 +74,7 @@ type orcheClient struct {
 type RequestServiceInfo struct {
 	ExecutionType string
 	ExeCmd        []string
+	ExeOption     map[string]interface{}
 }
 
 type ReqeustService struct {
@@ -115,7 +119,7 @@ func init() {
 	helper = dbhelper.GetInstance()
 }
 
-// RequestService handles service reqeust (ex. offloading) from service application
+// RequestService handles service request (ex. offloading) from service application
 func (orcheEngine *orcheImpl) RequestService(serviceInfo ReqeustService) ResponseService {
 	log.Printf("[RequestService] %v: %v\n", serviceInfo.ServiceName, serviceInfo.ServiceInfo)
 
@@ -135,8 +139,10 @@ func (orcheEngine *orcheImpl) RequestService(serviceInfo ReqeustService) Respons
 	go serviceClient.listenNotify()
 
 	executionTypes := make([]string, 0)
+	var scoringType string
 	for _, info := range serviceInfo.ServiceInfo {
 		executionTypes = append(executionTypes, info.ExecutionType)
+		scoringType, _ = info.ExeOption["scoringType"].(string)
 	}
 
 	candidates, err := orcheEngine.getCandidate(serviceInfo.ServiceName, executionTypes)
@@ -163,7 +169,21 @@ func (orcheEngine *orcheImpl) RequestService(serviceInfo ReqeustService) Respons
 		RemoteTargetInfo: TargetInfo{},
 	}
 
-	deviceScores := sortByScore(orcheEngine.gatherDevicesScore(candidates, serviceInfo.SelfSelection))
+	var deviceScores []deviceInfo
+
+	if scoringType == "resource" {
+		deviceResources := orcheEngine.gatherDevicesResource(candidates, serviceInfo.SelfSelection)
+		if len(deviceResources) <= 0 {
+			return errorResp
+		}
+		for i, dev := range deviceResources {
+			deviceResources[i].score, _ = orcheEngine.GetScoreWithResource(dev.resource)
+		}
+		deviceScores = sortByScore(deviceResources)
+	} else {
+		deviceScores = sortByScore(orcheEngine.gatherDevicesScore(candidates, serviceInfo.SelfSelection))
+	}
+
 	if len(deviceScores) <= 0 {
 		return errorResp
 	} else if deviceScores[0].score == scoringmgr.INVALID_SCORE {
@@ -243,12 +263,12 @@ func (orcheEngine orcheImpl) getCandidate(appName string, execType []string) (de
 	return helper.GetDeviceInfoWithService(appName, execType)
 }
 
-func (orcheEngine orcheImpl) gatherDevicesScore(candidates []dbhelper.ExecutionCandidate, selfSelection bool) (deviceScores []deviceScore) {
+func (orcheEngine orcheImpl) gatherDevicesScore(candidates []dbhelper.ExecutionCandidate, selfSelection bool) (deviceScores []deviceInfo) {
 	count := len(candidates)
 	if !selfSelection {
 		count -= 1
 	}
-	scores := make(chan deviceScore, count)
+	scores := make(chan deviceInfo, count)
 
 	info, err := sysDBExecutor.Get(sysDB.ID)
 	if err != nil {
@@ -293,7 +313,7 @@ func (orcheEngine orcheImpl) gatherDevicesScore(candidates []dbhelper.ExecutionC
 
 			if len(cand.Endpoint) == 0 {
 				log.Println("[orchestrationapi] cannot getting score, cause by ip list is empty")
-				scores <- deviceScore{endpoint: "", score: float64(0.0), id: cand.Id}
+				scores <- deviceInfo{endpoint: "", score: float64(0.0), id: cand.Id}
 				return
 			}
 
@@ -308,7 +328,7 @@ func (orcheEngine orcheImpl) gatherDevicesScore(candidates []dbhelper.ExecutionC
 
 			if err != nil {
 				log.Println("[orchestrationapi] cannot getting score from :", cand.Endpoint[0], "cause by", err.Error())
-				scores <- deviceScore{endpoint: cand.Endpoint[0], score: float64(0.0), id: cand.Id}
+				scores <- deviceInfo{endpoint: cand.Endpoint[0], score: float64(0.0), id: cand.Id}
 				return
 			}
 			log.Printf("[orchestrationapi] deviceScore")
@@ -316,7 +336,90 @@ func (orcheEngine orcheImpl) gatherDevicesScore(candidates []dbhelper.ExecutionC
 			log.Printf("candidate ExecType : %v", cand.ExecType)
 			log.Printf("candidate Endpoint : %v", cand.Endpoint[0])
 			log.Printf("candidate score    : %v", score)
-			scores <- deviceScore{endpoint: cand.Endpoint[0], score: score, id: cand.Id, execType: cand.ExecType}
+			scores <- deviceInfo{endpoint: cand.Endpoint[0], score: score, id: cand.Id, execType: cand.ExecType}
+		}(candidate)
+	}
+
+	wait.Wait()
+
+	return
+}
+
+// gatherDevicesResource gathers resource values from edge devices
+func (orcheEngine orcheImpl) gatherDevicesResource(candidates []dbhelper.ExecutionCandidate, selfSelection bool) (deviceResources []deviceInfo) {
+	count := len(candidates)
+	if !selfSelection {
+		count -= 1
+	}
+	resources := make(chan deviceInfo, count)
+
+	info, err := sysDBExecutor.Get(sysDB.ID)
+	if err != nil {
+		log.Println("[orchestrationapi] localhost devid gettering fail")
+		return
+	}
+
+	timeout := make(chan bool, 1)
+	go func() {
+		time.Sleep(3 * time.Second)
+		timeout <- true
+	}()
+
+	var wait sync.WaitGroup
+	wait.Add(1)
+	index := 0
+	go func() {
+		defer wait.Done()
+		for {
+			select {
+			case resource := <-resources:
+				deviceResources = append(deviceResources, resource)
+				if index++; count == index {
+					return
+				}
+			case <-timeout:
+				return
+			}
+		}
+		return
+	}()
+
+	localhosts, err := orcheEngine.networkhelper.GetIPs()
+	if err != nil {
+		log.Println("[orchestrationapi] localhost ip gettering fail. maybe skipped localhost")
+	}
+
+	for _, candidate := range candidates {
+		go func(cand dbhelper.ExecutionCandidate) {
+			var resource map[string]interface{}
+			var err error
+
+			if len(cand.Endpoint) == 0 {
+				log.Println("[orchestrationapi] cannot getting score, cause by ip list is empty")
+				resources <- deviceInfo{endpoint: "", resource: resource, id: cand.Id, execType: cand.ExecType}
+				return
+			}
+
+			if isLocalhost(cand.Endpoint, localhosts) {
+				if !selfSelection {
+					return
+				}
+				resource, err = orcheEngine.GetResource(info.Value)
+			} else {
+				resource, err = orcheEngine.clientAPI.DoGetResourceRemoteDevice(info.Value, cand.Endpoint[0])
+			}
+
+			if err != nil {
+				log.Println("[orchestrationapi] cannot getting msgs from :", cand.Endpoint[0], "cause by", err.Error())
+				resources <- deviceInfo{endpoint: cand.Endpoint[0], resource: resource, id: cand.Id, execType: cand.ExecType}
+				return
+			}
+			log.Printf("[orchestrationapi] deviceResource")
+			log.Printf("candidate Id       : %v", cand.Id)
+			log.Printf("candidate ExecType : %v", cand.ExecType)
+			log.Printf("candidate Endpoint : %v", cand.Endpoint[0])
+			log.Printf("candidate resource : %v", resource)
+			resources <- deviceInfo{endpoint: cand.Endpoint[0], resource: resource, id: cand.Id, execType: cand.ExecType}
 		}(candidate)
 	}
 
@@ -361,7 +464,7 @@ func addServiceClient(clientID int, appName string) (client *orcheClient) {
 	return
 }
 
-func sortByScore(deviceScores []deviceScore) []deviceScore {
+func sortByScore(deviceScores []deviceInfo) []deviceInfo {
 	sort.Slice(deviceScores, func(i, j int) bool {
 		return deviceScores[i].score > deviceScores[j].score
 	})

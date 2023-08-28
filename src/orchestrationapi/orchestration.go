@@ -1,5 +1,5 @@
 /*******************************************************************************
- * Copyright 2019 Samsung Electronics All Rights Reserved.
+ * Copyright 2020 Samsung Electronics All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -15,7 +15,7 @@
  *
  *******************************************************************************/
 
-// Package orchestrationapi provides orchestration functionalities to handle distributed service in multi-device enviroment
+// Package orchestrationapi provides orchestration functionalities to handle distributed service in multi-device environment
 package orchestrationapi
 
 import (
@@ -31,6 +31,7 @@ import (
 	"controller/configuremgr"
 	"controller/discoverymgr"
 	"controller/scoringmgr"
+	"controller/securemgr/verifier"
 	"controller/servicemgr"
 	"controller/servicemgr/executor"
 	"controller/servicemgr/notification"
@@ -39,7 +40,7 @@ import (
 
 const logtag = "Orchestration"
 
-// Orche is the interface implemented by orchestration start funciton
+// Orche is the interface implemented by orchestration start function
 type Orche interface {
 	Start(deviceIDPath string, platform string, executionType string)
 }
@@ -47,6 +48,7 @@ type Orche interface {
 // OrcheExternalAPI is the interface implemented by external REST API
 type OrcheExternalAPI interface {
 	RequestService(serviceInfo ReqeustService) ResponseService
+	verifier.VerifierConf
 }
 
 // OrcheInternalAPI is the interface implemented by internal REST API
@@ -55,6 +57,10 @@ type OrcheInternalAPI interface {
 	ExecuteAppOnLocal(appInfo map[string]interface{})
 	HandleNotificationOnLocal(serviceID float64, status string) error
 	GetScore(target string) (scoreValue float64, err error)
+	GetOrchestrationInfo() (platfrom string, executionType string, serviceList []string, err error)
+	HandleDeviceInfo(deviceID string, virtualAddr string, privateAddr string)
+	GetScoreWithResource(target map[string]interface{}) (scoreValue float64, err error)
+	GetResource(target string) (resourceMsg map[string]interface{}, err error)
 }
 
 var (
@@ -92,6 +98,9 @@ type OrchestrationBuilder struct {
 	isSetScoring bool
 	scoringIns   scoringmgr.Scoring
 
+	isSetVerifierConf bool
+	verifierIns       verifier.VerifierConf
+
 	isSetDiscovery bool
 	discoveryIns   discoverymgr.Discovery
 
@@ -106,6 +115,12 @@ type OrchestrationBuilder struct {
 
 	isSetClient bool
 	clientAPI   client.Clienter
+}
+
+// SetVerifierConf registers the interface to setting up verifier configuration
+func (o *OrchestrationBuilder) SetVerifierConf(d verifier.VerifierConf) {
+	o.isSetVerifierConf = true
+	o.verifierIns = d
 }
 
 // SetScoring registers the interface to handle resource scoring
@@ -144,16 +159,18 @@ func (o *OrchestrationBuilder) SetClient(c client.Clienter) {
 	o.clientAPI = c
 }
 
-// Build registrers every interface to run orchestration
+// Build registers every interface to run orchestration
 func (o OrchestrationBuilder) Build() Orche {
 	if !o.isSetWatcher || !o.isSetDiscovery || !o.isSetScoring ||
-		!o.isSetService || !o.isSetExecutor || !o.isSetClient {
+		!o.isSetService || !o.isSetExecutor || !o.isSetClient ||
+		!o.isSetVerifierConf {
 		return nil
 	}
 
 	orcheIns.Ready = false
 	orcheIns.scoringIns = o.scoringIns
 	orcheIns.discoverIns = o.discoveryIns
+	orcheIns.verifierIns = o.verifierIns
 	orcheIns.watcher = o.watcherIns
 	orcheIns.serviceIns = o.serviceIns
 	orcheIns.clientAPI = o.clientAPI
@@ -161,6 +178,8 @@ func (o OrchestrationBuilder) Build() Orche {
 
 	orcheIns.notificationIns = notification.GetInstance()
 	orcheIns.serviceIns.SetLocalServiceExecutor(o.executorIns)
+
+	orcheIns.discoverIns.SetRestResource()
 
 	return orcheIns
 }
@@ -202,4 +221,29 @@ func (o orcheImpl) HandleNotificationOnLocal(serviceID float64, status string) e
 // GetScore gets a resource score of local device for specific app
 func (o orcheImpl) GetScore(devID string) (scoreValue float64, err error) {
 	return o.scoringIns.GetScore(devID)
+}
+
+// GetScoreWithResource gets a resource score of local device for specific app
+func (o orcheImpl) GetScoreWithResource(resource map[string]interface{}) (scoreValue float64, err error) {
+	return o.scoringIns.GetScoreWithResource(resource)
+}
+
+// GetResource gets resource values of local device for running apps
+func (o orcheImpl) GetResource(devID string) (resourceMsg map[string]interface{}, err error) {
+	return o.scoringIns.GetResource(devID)
+}
+
+// RequestVerifierConf setting up configuration of white list containers
+func (o orcheImpl) RequestVerifierConf(containerInfo verifier.RequestVerifierConf) verifier.ResponseVerifierConf {
+	return o.verifierIns.RequestVerifierConf(containerInfo)
+}
+
+//GetOrchestrationInfo gets orchestration info of the device
+func (o orcheImpl) GetOrchestrationInfo() (platform string, executionType string, serviceList []string, err error) {
+	return o.discoverIns.GetOrchestrationInfo()
+}
+
+//HandleDeviceInfo gets the peer's public and private Ip from relay server
+func (o orcheImpl) HandleDeviceInfo(deviceID string, virtualAddr string, privateAddr string) {
+	o.discoverIns.AddDeviceInfo(deviceID, virtualAddr, privateAddr)
 }

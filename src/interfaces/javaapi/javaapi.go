@@ -1,7 +1,5 @@
-// +build !secure
-
 /*******************************************************************************
- * Copyright 2019 Samsung Electronics All Rights Reserved.
+ * Copyright 2020 Samsung Electronics All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -21,26 +19,73 @@
 package javaapi
 
 import (
+	"bytes"
 	"db/bolt/wrapper"
+	"fmt"
 	"log"
+	"net/http"
 	"strings"
 	"sync"
+	"time"
 
 	"common/logmgr"
+	"common/networkhelper"
 
 	configuremgr "controller/configuremgr/native"
 	"controller/discoverymgr"
 	scoringmgr "controller/scoringmgr"
+	"controller/securemgr/authenticator"
+	"controller/securemgr/verifier"
 	"controller/servicemgr"
 	"controller/servicemgr/executor/androidexecutor"
 
 	"orchestrationapi"
 
+	"restinterface/cipher/dummy"
 	"restinterface/cipher/sha256"
 	"restinterface/client/restclient"
 	"restinterface/internalhandler"
 	"restinterface/route"
+	"restinterface/tls"
 )
+
+// Handle Platform Dependencies
+const (
+	logPrefix     = "interface"
+	platform      = "android"
+	executionType = "android"
+
+	logStr                 = "/log"
+	configStr              = "/apps"
+	dbStr                  = "/data/db"
+	certificateFile        = "/data/cert"
+	containerWhiteListPath = "/data/cwl"
+	passPhraseJWTPath      = "/data/jwt"
+
+	cipherKeyFile = "/user/orchestration_userID.txt"
+	deviceIDFile  = "/device/orchestration_deviceID.txt"
+)
+
+var (
+	orcheEngine         orchestrationapi.Orche
+	edgeDir             string
+	logPath             string
+	configPath          string
+	dbPath              string
+	certificateFilePath string
+	cipherKeyFilePath   string
+	deviceIDFilePath    string
+)
+
+func initPlatformPath(edgeDir string) {
+	logPath = edgeDir + logStr
+	configPath = edgeDir + configStr
+	dbPath = edgeDir + dbStr
+	certificateFilePath = edgeDir + certificateFile
+
+	cipherKeyFilePath = edgeDir + cipherKeyFile
+	deviceIDFilePath = edgeDir + deviceIDFile
+}
 
 type RequestServiceInfo struct {
 	ExecutionType string
@@ -109,47 +154,39 @@ func (r ResponseService) GetTarget() string {
 	return r.RemoteTargetInfo.Target
 }
 
-const logPrefix = "interface"
-
-// Handle Platform Dependencies
-const (
-	platform      = "android"
-	executionType = "android"
-
-	edgeDir = "/data/user/0/com.samsung.orchestration.service/files"
-
-	logPath             = edgeDir + "/log"
-	configPath          = edgeDir + "/apps"
-	dbPath              = edgeDir + "/data/db"
-	certificateFilePath = edgeDir + "/data/cert"
-
-	cipherKeyFilePath = edgeDir + "/user/orchestration_userID.txt"
-	deviceIDFilePath  = edgeDir + "/device/orchestration_deviceID.txt"
-)
-
-var orcheEngine orchestrationapi.Orche
-
 // ExecuteCallback is required to launch application in java layer
 type ExecuteCallback interface {
 	androidexecutor.ExecuteCallback
 }
 
 // OrchestrationInit runs orchestration service and discovers remote orchestration services
-func OrchestrationInit(executeCallback ExecuteCallback) (errCode int) {
+func OrchestrationInit(executeCallback ExecuteCallback, edgeDir string, isSecured bool) (errCode int) {
+	initPlatformPath(edgeDir)
 
 	logmgr.Init(logPath)
 	log.Printf("[%s] OrchestrationInit", logPrefix)
 
 	wrapper.SetBoltDBPath(dbPath)
 
+	if isSecured {
+		verifier.Init(containerWhiteListPath)
+		authenticator.Init(passPhraseJWTPath)
+	}
+
 	restIns := restclient.GetRestClient()
-	restIns.SetCipher(sha256.GetCipher(cipherKeyFilePath))
+	if isSecured {
+		restIns.SetCipher(dummy.GetCipher(cipherKeyFilePath))
+	} else {
+		restIns.SetCipher(sha256.GetCipher(cipherKeyFilePath))
+	}
 
 	servicemgr.GetInstance().SetClient(restIns)
+	discoverymgr.GetInstance().SetClient(restIns)
 
 	builder := orchestrationapi.OrchestrationBuilder{}
 	builder.SetWatcher(configuremgr.GetInstance(configPath))
 	builder.SetDiscovery(discoverymgr.GetInstance())
+	builder.SetVerifierConf(verifier.GetInstance())
 	builder.SetScoring(scoringmgr.GetInstance())
 	builder.SetService(servicemgr.GetInstance())
 	builder.SetExecutor(androidexecutor.GetInstance())
@@ -166,7 +203,12 @@ func OrchestrationInit(executeCallback ExecuteCallback) (errCode int) {
 
 	orcheEngine.Start(deviceIDFilePath, platform, executionType)
 
-	restEdgeRouter := route.NewRestRouter()
+	var restEdgeRouter *route.RestRouter
+	if isSecured {
+		restEdgeRouter = route.NewRestRouterWithCerti(certificateFilePath)
+	} else {
+		restEdgeRouter = route.NewRestRouter()
+	}
 
 	internalapi, err := orchestrationapi.GetInternalAPI()
 	if err != nil {
@@ -174,7 +216,14 @@ func OrchestrationInit(executeCallback ExecuteCallback) (errCode int) {
 	}
 	ihandle := internalhandler.GetHandler()
 	ihandle.SetOrchestrationAPI(internalapi)
-	ihandle.SetCipher(sha256.GetCipher(cipherKeyFilePath))
+
+	if isSecured {
+		ihandle.SetCipher(dummy.GetCipher(cipherKeyFilePath))
+		ihandle.SetCertificateFilePath(certificateFilePath)
+	} else {
+		ihandle.SetCipher(sha256.GetCipher(cipherKeyFilePath))
+	}
+
 	restEdgeRouter.Add(ihandle)
 
 	restEdgeRouter.Start()
@@ -220,6 +269,103 @@ func OrchestrationRequestService(request *ReqeustService) *ResponseService {
 		},
 	}
 	return ret
+}
+
+//RegisterToBroadcastServer registers to the discovery server
+func RegisterToBroadcastServer() int {
+	log.Println(logPrefix, "Initiating Registration to Broadcast server")
+	for {
+		if discoverymgr.GetInstance() != nil {
+			err := discoverymgr.GetInstance().NotifyMNEDCBroadcastServer()
+			if err != nil {
+				log.Println(logPrefix, "Registering to Broadcast server Error", err.Error(), ", retrying")
+				time.Sleep(2 * time.Second)
+				continue
+			}
+			return 0
+		}
+		break
+	}
+	return 1
+}
+
+//EncryptToByteAndPost encryps json data to byte array
+func EncryptToByteAndPost(data string, target string) int {
+	splitted := strings.Split(data, ",")
+	jsonMap := make(map[string]interface{})
+
+	if len(splitted) < 3 {
+		log.Println(logPrefix, "Improper request data")
+		return 1
+	}
+	jsonMap["VirtualAddr"] = splitted[0]
+	jsonMap["PrivateAddr"] = splitted[1]
+	jsonMap["DeviceID"] = splitted[2]
+
+	cipher := sha256.GetCipher(cipherKeyFilePath)
+	jsonStr, err := cipher.EncryptJSONToByte(jsonMap)
+	if err != nil {
+		log.Println("Error in encrypting jsonMap", err.Error())
+		return 1
+	}
+
+	restapi := "/api/v1/discoverymgr/register"
+	url := fmt.Sprintf("http://%s%s", target+":56002", restapi)
+
+	req, err := http.NewRequest("POST", url, bytes.NewBuffer(jsonStr))
+	req.Header.Set("Content-Type", "application/json")
+
+	client := &http.Client{}
+	resp, err := client.Do(req)
+	if err != nil {
+		log.Println("Error in Post", err.Error())
+		return 1
+	}
+	if resp != nil && resp.Body != nil {
+		resp.Body.Close()
+	}
+
+	return 0
+}
+
+//MNEDCConnectionClosed notifies discovery manager that MNEDC connection is closed
+func MNEDCConnectionClosed() {
+	if discoverymgr.GetInstance() != nil {
+		discoverymgr.GetInstance().MNEDCClosedCallback()
+		return
+	}
+	log.Println(logPrefix, "discoverymgr instance is nil")
+}
+
+//MNEDCConnectionReEstablished notifies discovery manager that MNEDC connection is re-established
+func MNEDCConnectionReEstablished() {
+	if discoverymgr.GetInstance() != nil {
+		discoverymgr.GetInstance().MNEDCReconciledCallback()
+		return
+	}
+	log.Println(logPrefix, "discoverymgr instance is nil")
+}
+
+//GetPrivateIP returns private IP of the device
+func GetPrivateIP() string {
+	networkIns := networkhelper.GetInstance()
+	if networkIns != nil {
+		privateIP, err := networkIns.GetOutboundIP()
+		if err != nil {
+			return ""
+		}
+		return privateIP
+	}
+	return ""
+
+}
+
+type PSKHandler interface {
+	tls.PSKHandler
+}
+
+func OrchestrationSetPSKHandler(pskHandler PSKHandler) {
+	tls.SetPSKHandler(pskHandler)
 }
 
 var count int
